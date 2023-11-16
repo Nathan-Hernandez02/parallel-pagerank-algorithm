@@ -459,7 +459,7 @@ int main(int argc, char *argv[]) {
     int choice;
 
     while (choice != 1 && choice != 2 && choice != 3) {
-      cout << "Which method do you want to run mutex == 1, spin_locks == 2 or test_and_swap == 3?: ";
+      cout << "Which method do you want to run mutex == 1, spin_locks == 2 or compare_and_swap == 3?: ";
       cin >> choice;
     }
 
