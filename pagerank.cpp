@@ -317,7 +317,7 @@ void scale(CsrGraph* g) {
   }
 }
 
-void compute_pagerank(CsrGraph* g, const double threshold, const double damping, int num_threads) {
+void compute_pagerank(CsrGraph* g, const double threshold, const double damping, int num_threads, int choice) {
   // You have to divide the work and assign it to threads to make this function parallel
 
   // initialize
@@ -340,9 +340,13 @@ void compute_pagerank(CsrGraph* g, const double threshold, const double damping,
         int dst = g->get_edge_dst(e);
 
         // comment out the ones you dont want to run.
-        // g->relax_edge_mutex(n, dst, my_contribution);
-        g->relax_edge_spin(n, dst, my_contribution);
-        // g->relax_edge_with_cas(n, dst, my_contribution);
+        if(choice == 1) {
+          g->relax_edge_mutex(n, dst, my_contribution);
+        } else if (choice == 2) {
+          g->relax_edge_spin(n, dst, my_contribution);
+        } else if (choice == 3) {
+          g->relax_edge_with_cas(n, dst, my_contribution);
+        }
       }
     }
 
@@ -452,7 +456,14 @@ int main(int argc, char *argv[]) {
 
   // compute the pagerank using push-style method
   if(section == 1) {
-    compute_pagerank(g, threshold, damping, num_threads);
+    int choice;
+
+    while (choice != 1 && choice != 2 && choice != 3) {
+      cout << "Which method do you want to run mutex == 1, spin_locks == 2 or test_and_swap == 3?: ";
+      cin >> choice;
+    }
+
+    compute_pagerank(g, threshold, damping, num_threads, choice);
   }
 
   if(section == 2) {
