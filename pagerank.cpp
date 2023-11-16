@@ -341,10 +341,13 @@ void compute_pagerank(CsrGraph* g, const double threshold, const double damping,
 
         // comment out the ones you dont want to run.
         if(choice == 1) {
+          printf("-----------------------------STARTING MUTEX--------------------------------------");
           g->relax_edge_mutex(n, dst, my_contribution);
         } else if (choice == 2) {
+          printf("-----------------------------STARTING SPIN LOCK--------------------------------------");
           g->relax_edge_spin(n, dst, my_contribution);
         } else if (choice == 3) {
+          printf("-----------------------------STARTING COMPARE AND SWAP-------------------------------------");
           g->relax_edge_with_cas(n, dst, my_contribution);
         }
       }
