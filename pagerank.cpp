@@ -340,17 +340,11 @@ void compute_pagerank(CsrGraph* g, const double threshold, const double damping,
         int dst = g->get_edge_dst(e);
 
         // comment out the ones you dont want to run.
-        if(choice == 1) {
-          printf("-----------------------------STARTING MUTEX--------------------------------------");
-          g->relax_edge_mutex(n, dst, my_contribution);
-        } else if (choice == 2) {
-          printf("-----------------------------STARTING SPIN LOCK--------------------------------------");
-          g->relax_edge_spin(n, dst, my_contribution);
-        } else if (choice == 3) {
-          printf("-----------------------------STARTING COMPARE AND SWAP-------------------------------------");
-          g->relax_edge_with_cas(n, dst, my_contribution);
-        }
+        if(choice == 1) g->relax_edge_mutex(n, dst, my_contribution);
+        if(choice == 2) g->relax_edge_spin(n, dst, my_contribution);
+        if(choice == 3) g->relax_edge_with_cas(n, dst, my_contribution);
       }
+      // printf("this is the num_node: %d \n", n);
     }
 
     // check the change across successive iterations to determine convergence
@@ -465,6 +459,10 @@ int main(int argc, char *argv[]) {
       cout << "Which method do you want to run mutex == 1, spin_locks == 2 or compare_and_swap == 3?: ";
       cin >> choice;
     }
+
+    if(choice == 1) printf("----------------------------------STARTING MUTEX-------------------------------------------\n");
+    if(choice == 2) printf("---------------------------------STARTING SPIN LOCK----------------------------------------\n");
+    if(choice == 3) printf("-----------------------------STARTING COMPARE AND SWAP-------------------------------------\n");
 
     compute_pagerank(g, threshold, damping, num_threads, choice);
   }
