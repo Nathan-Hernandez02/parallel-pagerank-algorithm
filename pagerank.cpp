@@ -7,6 +7,10 @@
 #include <cstdlib>
 #include <boost/algorithm/string.hpp>
 
+#include <mutex>
+#include <atomic>
+#include <thread> 
+
 using namespace std;
 
 // index for the pagerank labels,
@@ -22,6 +26,16 @@ class CsrGraph {
 // The whole point of using CSR is that it utilizes the space efficiently.
 
 private:
+
+  // mutex locks
+  mutex * node_mutex;
+
+  // spin lock
+  atomic_flag * spin_lock;
+
+  // atomic
+  std::atomic<double> * atomic;
+
   // use an array of struct for labels
   struct Node {
     // labels[0] is the current label, labels[1] is the next label
@@ -75,6 +89,10 @@ public:
     delete [] rp;
     delete [] ci;
     delete [] ai;
+
+    delete [] node_mutex;
+    delete [] spin_lock;
+    delete [] atomic;
   }
 
   vector<Edge> parse_dimacs(ifstream& f_dimacs) {
@@ -217,6 +235,45 @@ public:
     // return the destination node in edge e (index for ci)
     return ci[e];
   }
+
+  void init_sync() {
+    node_mutex = new mutex[num_nodes + 1];
+    spin_lock = new atomic_flag[num_nodes + 1];
+
+    for(int i = 1; i <= num_nodes; ++i) {
+      spin_lock[i].clear();
+    }
+    atomic = new std::atomic<double>[num_nodes + 1];
+  }
+
+  void spin_lock_node(int n) {
+    while(spin_lock[n].test_and_set(std::memory_order_acquire)) {
+    }
+  }
+
+  void spin_unlock_node(int n){
+    spin_lock[n].clear(std::memory_order_release);
+  }
+
+  void relax_edge_mutex(int src, int dst, double my_contribution) {
+    lock_guard<mutex> lock(node_mutex[dst]); // Acquire lock
+    set_label(dst, NEXT, get_label(dst, NEXT) + my_contribution);
+  }
+
+  void relax_edge_spin(int src, int dst, double my_contribution) {
+    spin_lock_node(dst);
+    set_label(dst, NEXT, get_label(dst, NEXT) + my_contribution);
+    spin_unlock_node(dst);
+  }
+
+  void relax_edge_with_cas(int src, int dst, double my_contribution) {
+    double old_label, new_label;
+    do 
+    {
+      old_label = atomic[dst].load();
+      new_label = old_label + my_contribution;
+    } while (!atomic_compare_exchange_weak(&atomic[dst], &old_label, new_label));
+  }
 };
 
 void reset_next_label(CsrGraph* g, const double damping) {
@@ -232,7 +289,9 @@ bool is_converged(CsrGraph* g, const double threshold) {
   for (int n = 1; n <= g->node_size(); n++) {
     const double cur_label = g->get_label(n, CURRENT);
     const double next_label = g->get_label(n, NEXT);
-    if (fabs(next_label - cur_label) > threshold) {
+    double change = fabs(next_label - cur_label) / cur_label *100.0;
+    if (change > threshold) {
+      printf("this is the change: %f and this is the threshold: %f \n", change, threshold);
       return false;
     }
   }  
@@ -258,10 +317,11 @@ void scale(CsrGraph* g) {
   }
 }
 
-void compute_pagerank(CsrGraph* g, const double threshold, const double damping) {
+void compute_pagerank(CsrGraph* g, const double threshold, const double damping, int num_threads) {
   // You have to divide the work and assign it to threads to make this function parallel
 
   // initialize
+  g->init_sync();
   bool convergence = false;
   int num_nodes = g->node_size();
   for (int n = 1; n <= num_nodes; n++) {
@@ -269,6 +329,45 @@ void compute_pagerank(CsrGraph* g, const double threshold, const double damping)
   }
 
   do {
+    // reset next labels
+    reset_next_label(g, damping);
+
+    // apply current node contribution to others
+    #pragma omp parallel for num_threads(num_threads)
+    for (int n = 1; n <= num_nodes; n++) {
+      double my_contribution = damping * g->get_label(n, CURRENT) / (double)g->get_out_degree(n);
+      for (int e = g->edge_begin(n); e < g->edge_end(n); e++) {
+        int dst = g->get_edge_dst(e);
+
+        // comment out the ones you dont want to run.
+        // g->relax_edge_mutex(n, dst, my_contribution);
+        g->relax_edge_spin(n, dst, my_contribution);
+        // g->relax_edge_with_cas(n, dst, my_contribution);
+      }
+    }
+
+    // check the change across successive iterations to determine convergence
+    convergence = is_converged(g, threshold);
+
+    // update current labels
+    update_current_label(g);
+  } while(!convergence);
+
+  // scale the sum to 1
+  scale(g);
+}
+
+void compute_pagerank_balancing(CsrGraph *g, const double threshold, const double damping, int num_threads){
+
+  bool convergence = false;
+  int num_nodes = g->node_size();
+  for (int n = 1; n <= num_nodes; n++)
+  {
+    g->set_label(n, CURRENT, 1.0 / num_nodes);
+  }
+
+  do
+  {
     // reset next labels
     reset_next_label(g, damping);
 
@@ -286,7 +385,7 @@ void compute_pagerank(CsrGraph* g, const double threshold, const double damping)
 
     // update current labels
     update_current_label(g);
-  } while(!convergence);
+  } while (!convergence);
 
   // scale the sum to 1
   scale(g);
@@ -336,8 +435,29 @@ int main(int argc, char *argv[]) {
   const double threshold = 1.0e-4;
   const double damping = 0.85;
 
+  // change the number of threads
+  int num_threads;
+  // 1,2,4,8,16
+  while (num_threads != 1 && num_threads != 2 && num_threads != 4 && num_threads != 8 && num_threads != 16) {
+    cout << "How many threads do you want to run? Choices [1, 2, 4, 8, 16]: ";
+    cin >> num_threads;
+  }
+
+  int section;
+
+  while(section != 1 && section != 2) {
+    cout << "Which section do you want to run one or two?: ";
+    cin >> section;
+  }
+
   // compute the pagerank using push-style method
-  compute_pagerank(g, threshold, damping);
+  if(section == 1) {
+    compute_pagerank(g, threshold, damping, num_threads);
+  }
+
+  if(section == 2) {
+    compute_pagerank_balancing(g, threshold, damping, num_threads);
+  }
 
   // sort and print the labels to the output file
   sort_and_print_label(g, argv[2]);
