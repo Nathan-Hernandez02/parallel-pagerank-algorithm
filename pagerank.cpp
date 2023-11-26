@@ -266,17 +266,7 @@ public:
     set_label(dst, NEXT, get_label(dst, NEXT) + my_contribution);
     spin_unlock_node(dst);
   }
-
-  void relax_edge_with_cas(int src, int dst, double my_contribution) {
-    double old_label, new_label;
-    std::atomic<double> &atomic_dst = atomic[dst];
-
-    do {
-      old_label = atomic_dst.load(std::memory_order_relaxed);
-      new_label = old_label + my_contribution;
-    } while (!atomic_dst.compare_exchange_weak(old_label, new_label, std::memory_order_acq_rel, std::memory_order_relaxed));
-  }
-
+  
   void compare_and_swap(int src, int dst, double my_contribution) {
     std::atomic<double> &var = atomic[dst];
     double old_val = var.load(std::memory_order_relaxed);
