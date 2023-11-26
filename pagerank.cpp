@@ -33,7 +33,7 @@ private:
   // spin lock
   atomic_flag * spin_lock;
 
-  // atomic
+  // atomic CAS
   std::atomic<double> * atomic;
 
   // use an array of struct for labels
@@ -256,8 +256,9 @@ public:
   }
 
   void relax_edge_mutex(int src, int dst, double my_contribution) {
-    lock_guard<mutex> lock(node_mutex[dst]); // Acquire lock
+    lock_guard<mutex> lock(node_mutex[dst]); // Acquires lock
     set_label(dst, NEXT, get_label(dst, NEXT) + my_contribution);
+    // releases lock after set_label is done.
   }
 
   void relax_edge_spin(int src, int dst, double my_contribution) {
@@ -268,11 +269,12 @@ public:
 
   void relax_edge_with_cas(int src, int dst, double my_contribution) {
     double old_label, new_label;
-    do 
-    {
-      old_label = atomic[dst].load();
+    std::atomic<double> &atomic_dst = atomic[dst];
+
+    do {
+      old_label = atomic_dst.load(std::memory_order_relaxed);
       new_label = old_label + my_contribution;
-    } while (!atomic_compare_exchange_weak(&atomic[dst], &old_label, new_label));
+    } while (!atomic_dst.compare_exchange_weak(old_label, new_label, std::memory_order_acq_rel, std::memory_order_relaxed));
   }
 };
 
@@ -289,7 +291,8 @@ bool is_converged(CsrGraph* g, const double threshold) {
   for (int n = 1; n <= g->node_size(); n++) {
     const double cur_label = g->get_label(n, CURRENT);
     const double next_label = g->get_label(n, NEXT);
-    double change = fabs(next_label - cur_label) / cur_label *100.0;
+    // section 0 done.
+    double change = fabs((next_label - cur_label) / cur_label);
     if (change > threshold) {
       printf("this is the change: %f and this is the threshold: %f \n", change, threshold);
       return false;
@@ -339,10 +342,11 @@ void compute_pagerank(CsrGraph* g, const double threshold, const double damping,
       for (int e = g->edge_begin(n); e < g->edge_end(n); e++) {
         int dst = g->get_edge_dst(e);
 
-        // comment out the ones you dont want to run.
+        //section one
         if(choice == 1) g->relax_edge_mutex(n, dst, my_contribution);
         if(choice == 2) g->relax_edge_spin(n, dst, my_contribution);
         if(choice == 3) g->relax_edge_with_cas(n, dst, my_contribution);
+        if(choice == 4) g->set_label(dst, NEXT, g->get_label(dst, NEXT) + my_contribution);
       }
       // printf("this is the num_node: %d \n", n);
     }
@@ -424,50 +428,50 @@ void sort_and_print_label(CsrGraph* g, string out_file) {
 // Process edges in order and move source vertex when needed
 // Use compare-and-swap for synchronization
 // Assign equal number of edges to each thread 
-int num_threads = 4;
-int edges_per_thread = num_edges / num_threads;
+// int num_threads = 4;
+// int edges_per_thread = num_edges / num_threads;
 
-#pragma omp parallel num_threads(num_threads)
-{
-    int thread_id = omp_get_thread_num();
-    int start_edge = thread_id * edges_per_thread; 
-    int end_edge = (thread_id + 1) * edges_per_thread - 1;
-    if (thread_id == num_threads - 1) {
-        end_edge = num_edges - 1; 
-    }
+// #pragma omp parallel num_threads(num_threads)
+// {
+//     int thread_id = omp_get_thread_num();
+//     int start_edge = thread_id * edges_per_thread; 
+//     int end_edge = (thread_id + 1) * edges_per_thread - 1;
+//     if (thread_id == num_threads - 1) {
+//         end_edge = num_edges - 1; 
+//     }
     
-    // Binary search to find range of vertices 
-    int src_start = 0;
-    int src_end = num_nodes - 1;
-    while (src_start < src_end) {
-        int mid = src_start + (src_end - src_start) / 2;
-        if (g->edge_begin(mid) <= start_edge) {
-            src_start = mid + 1; 
-        } else {
-            src_end = mid;
-        }
-    }
+//     // Binary search to find range of vertices 
+//     int src_start = 0;
+//     int src_end = num_nodes - 1;
+//     while (src_start < src_end) {
+//         int mid = src_start + (src_end - src_start) / 2;
+//         if (g->edge_begin(mid) <= start_edge) {
+//             src_start = mid + 1; 
+//         } else {
+//             src_end = mid;
+//         }
+//     }
     
-    int src_vertex = src_start;
-    for (int e = start_edge; e <= end_edge; e++) {
-        // Compute contribution 
-        double contribution = 
-            damping * g->get_label(src_vertex, CURRENT) / g->get_out_degree(src_vertex);
+//     int src_vertex = src_start;
+//     for (int e = start_edge; e <= end_edge; e++) {
+//         // Compute contribution 
+//         double contribution = 
+//             damping * g->get_label(src_vertex, CURRENT) / g->get_out_degree(src_vertex);
             
-        int dst = g->get_edge_dst(e);
+//         int dst = g->get_edge_dst(e);
         
-        // Use compare-and-swap to update label 
-        double old_val = g->get_label(dst, NEXT);
-        while (!compare_and_swap(old_val, old_val + contribution)) {
-            old_val = g->get_label(dst, NEXT);
-        }
+//         // Use compare-and-swap to update label 
+//         double old_val = g->get_label(dst, NEXT);
+//         while (!compare_and_swap(old_val, old_val + contribution)) {
+//             old_val = g->get_label(dst, NEXT);
+//         }
         
-        // Move to next vertex if needed
-        if (e + 1 >= g->edge_begin(src_vertex + 1)) {
-            src_vertex++;
-        }
-    }
-}
+//         // Move to next vertex if needed
+//         if (e + 1 >= g->edge_begin(src_vertex + 1)) {
+//             src_vertex++;
+//         }
+//     }
+// }
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 int main(int argc, char *argv[]) {
@@ -510,14 +514,15 @@ int main(int argc, char *argv[]) {
   if(section == 1) {
     int choice;
 
-    while (choice != 1 && choice != 2 && choice != 3) {
-      cout << "Which method do you want to run mutex == 1, spin_locks == 2 or compare_and_swap == 3?: ";
+    while (choice != 1 && choice != 2 && choice != 3 && choice != 4) {
+      cout << "Which method do you want to run mutex == 1, spin_locks == 2, compare_and_swap == 3 or default == 4?: ";
       cin >> choice;
     }
 
     if(choice == 1) printf("----------------------------------STARTING MUTEX-------------------------------------------\n");
     if(choice == 2) printf("---------------------------------STARTING SPIN LOCK----------------------------------------\n");
     if(choice == 3) printf("-----------------------------STARTING COMPARE AND SWAP-------------------------------------\n");
+    if(choice == 4) printf("----------------------------------STARTING DEFAULT-------------------------------------------\n");
 
     compute_pagerank(g, threshold, damping, num_threads, choice);
   }
