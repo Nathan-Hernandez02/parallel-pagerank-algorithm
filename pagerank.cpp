@@ -276,6 +276,22 @@ public:
       new_label = old_label + my_contribution;
     } while (!atomic_dst.compare_exchange_weak(old_label, new_label, std::memory_order_acq_rel, std::memory_order_relaxed));
   }
+
+  void compare_and_swap(int src, int dst, double my_contribution) {
+    std::atomic<double> &var = atomic[dst];
+    double old_val = var.load(std::memory_order_relaxed);
+    double new_val = old_val + my_contribution;
+    bool done = false;
+    do {
+      if(new_val > old_val) {
+        done = var.compare_exchange_weak(old_val, new_val, std::memory_order_acq_rel, std::memory_order_relaxed);
+      }
+      else {
+        done = true;
+      }
+    } while (!done);
+  }
+
 };
 
 void reset_next_label(CsrGraph* g, const double damping) {
@@ -345,7 +361,7 @@ void compute_pagerank(CsrGraph* g, const double threshold, const double damping,
         //section one
         if(choice == 1) g->relax_edge_mutex(n, dst, my_contribution);
         if(choice == 2) g->relax_edge_spin(n, dst, my_contribution);
-        if(choice == 3) g->relax_edge_with_cas(n, dst, my_contribution);
+        if(choice == 3) g->compare_and_swap(n, dst, my_contribution);
         if(choice == 4) g->set_label(dst, NEXT, g->get_label(dst, NEXT) + my_contribution);
       }
       // printf("this is the num_node: %d \n", n);
