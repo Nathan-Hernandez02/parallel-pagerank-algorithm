@@ -415,6 +415,61 @@ void sort_and_print_label(CsrGraph* g, string out_file) {
   }
 }
 
+
+/////////////////////////////////////// raw copied from AI (work in progress) ////////////////////////////////////////////
+// The key ideas:
+
+// Split edges evenly among threads
+// Use binary search to find source vertex range
+// Process edges in order and move source vertex when needed
+// Use compare-and-swap for synchronization
+// Assign equal number of edges to each thread 
+int num_threads = 4;
+int edges_per_thread = num_edges / num_threads;
+
+#pragma omp parallel num_threads(num_threads)
+{
+    int thread_id = omp_get_thread_num();
+    int start_edge = thread_id * edges_per_thread; 
+    int end_edge = (thread_id + 1) * edges_per_thread - 1;
+    if (thread_id == num_threads - 1) {
+        end_edge = num_edges - 1; 
+    }
+    
+    // Binary search to find range of vertices 
+    int src_start = 0;
+    int src_end = num_nodes - 1;
+    while (src_start < src_end) {
+        int mid = src_start + (src_end - src_start) / 2;
+        if (g->edge_begin(mid) <= start_edge) {
+            src_start = mid + 1; 
+        } else {
+            src_end = mid;
+        }
+    }
+    
+    int src_vertex = src_start;
+    for (int e = start_edge; e <= end_edge; e++) {
+        // Compute contribution 
+        double contribution = 
+            damping * g->get_label(src_vertex, CURRENT) / g->get_out_degree(src_vertex);
+            
+        int dst = g->get_edge_dst(e);
+        
+        // Use compare-and-swap to update label 
+        double old_val = g->get_label(dst, NEXT);
+        while (!compare_and_swap(old_val, old_val + contribution)) {
+            old_val = g->get_label(dst, NEXT);
+        }
+        
+        // Move to next vertex if needed
+        if (e + 1 >= g->edge_begin(src_vertex + 1)) {
+            src_vertex++;
+        }
+    }
+}
+/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
 int main(int argc, char *argv[]) {
   // Ex: ./pagerank road-NY.dimacs road-NY.txt
   if (argc < 3) {
