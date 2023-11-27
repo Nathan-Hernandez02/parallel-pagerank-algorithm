@@ -9,7 +9,8 @@
 
 #include <mutex>
 #include <atomic>
-#include <thread> 
+#include <thread>
+// #include <omp.h>
 
 using namespace std;
 
@@ -224,6 +225,7 @@ public:
   void set_label(int n, int which, double label) {
     // set the current or next label for node n
     node[n].labels[which] = label;
+    // printf("this is the label: %f and this is the node: %d\n", label, n);
   }
 
   int get_out_degree(int n) {
@@ -264,24 +266,46 @@ public:
   void relax_edge_spin(int src, int dst, double my_contribution) {
     spin_lock_node(dst);
     set_label(dst, NEXT, get_label(dst, NEXT) + my_contribution);
+    // printf("this is the label: %f \n", get_label(src, NEXT));
     spin_unlock_node(dst);
   }
-  
-  void compare_and_swap(int src, int dst, double my_contribution) {
-    std::atomic<double> &var = atomic[dst];
-    double old_val = var.load(std::memory_order_relaxed);
-    double new_val = old_val + my_contribution;
-    bool done = false;
-    do {
-      if(new_val > old_val) {
-        done = var.compare_exchange_weak(old_val, new_val, std::memory_order_acq_rel, std::memory_order_relaxed);
-      }
-      else {
-        done = true;
-      }
-    } while (!done);
+
+  void store_pankrank(int n, double my_contribution) {
+    double value = node[n].labels[1] + my_contribution;
+
+    // Atomically store the updated value
+    atomic[n].store(value, std::memory_order_relaxed);
+
+    // Update the NEXT label
+    set_label(n, NEXT, value);
   }
 
+  void compare_and_swap(int src, int dst, double my_contribution) {
+    auto condition = [](double old, double new_val)
+    { return fabs(new_val - old) > 0.0001; };
+
+    double old, new_val;
+    bool done = false;
+
+    do {
+      // Load the current value atomically
+      old = atomic[dst].load(std::memory_order_relaxed);
+
+      // Calculate the new value without updating
+      new_val = old + my_contribution;
+
+      if (condition(old, new_val)) {
+        // Perform the update using compare_and_swap with the calculated new value
+        done = atomic[dst].compare_exchange_weak(old, new_val, std::memory_order_acq_rel, std::memory_order_relaxed);
+      } else {
+        done = true;
+      }
+
+    } while (!done);
+
+    // Update the NEXT label outside the loop
+    store_pankrank(dst, my_contribution);
+  }
 };
 
 void reset_next_label(CsrGraph* g, const double damping) {
