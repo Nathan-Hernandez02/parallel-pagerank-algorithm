@@ -10,7 +10,8 @@
 #include <mutex>
 #include <atomic>
 #include <thread>
-// #include <omp.h>
+#include <omp.h>
+#include <time.h> /* for clock_gettime */
 
 using namespace std;
 
@@ -324,7 +325,7 @@ bool is_converged(CsrGraph* g, const double threshold) {
     // section 0 done.
     double change = fabs((next_label - cur_label) / cur_label);
     if (change > threshold) {
-      printf("this is the change: %f and this is the threshold: %f \n", change, threshold);
+      // printf("this is the change: %f and this is the threshold: %f \n", change, threshold);
       return false;
     }
   }  
@@ -361,6 +362,10 @@ void compute_pagerank(CsrGraph* g, const double threshold, const double damping,
     g->set_label(n, CURRENT, 1.0 / num_nodes);
   }
 
+  uint64_t execTime; /*time in nanoseconds */
+  struct timespec tick, tock;
+
+  clock_gettime(CLOCK_MONOTONIC_RAW, &tick);
   do {
     // reset next labels
     reset_next_label(g, damping);
@@ -376,7 +381,7 @@ void compute_pagerank(CsrGraph* g, const double threshold, const double damping,
         if(choice == 1) g->relax_edge_mutex(n, dst, my_contribution);
         if(choice == 2) g->relax_edge_spin(n, dst, my_contribution);
         if(choice == 3) g->compare_and_swap(n, dst, my_contribution);
-        if(choice == 4) g->set_label(dst, NEXT, g->get_label(dst, NEXT) + my_contribution);
+        // if(choice == 4) g->set_label(dst, NEXT, g->get_label(dst, NEXT) + my_contribution);
       }
       // printf("this is the num_node: %d \n", n);
     }
@@ -388,14 +393,29 @@ void compute_pagerank(CsrGraph* g, const double threshold, const double damping,
     update_current_label(g);
   } while(!convergence);
 
+  clock_gettime(CLOCK_MONOTONIC_RAW, &tock);
+
+  execTime = 1000000000 * (tock.tv_sec - tick.tv_sec) + tock.tv_nsec - tick.tv_nsec;
+
+  printf("NumThreads: %d, Elapsed process CPU time = %llu nanoseconds\n", num_threads, (long long unsigned int)execTime);
+
   // scale the sum to 1
   scale(g);
 }
 
-void compute_pagerank_balancing(CsrGraph *g, const double threshold, const double damping, int num_threads){
+bool compare_and_swap(std::atomic<double> &destination, double &expected, double new_value)
+{
+  return destination.compare_exchange_weak(expected, new_value,
+                                           std::memory_order_seq_cst, std::memory_order_seq_cst);
+}
 
+void compute_pagerank_balancing(CsrGraph *g, const double threshold, const double damping, int num_threads)
+{
   bool convergence = false;
+  g->init_sync();
   int num_nodes = g->node_size();
+  int num_edges = g->size_edges();
+
   for (int n = 1; n <= num_nodes; n++)
   {
     g->set_label(n, CURRENT, 1.0 / num_nodes);
@@ -407,11 +427,39 @@ void compute_pagerank_balancing(CsrGraph *g, const double threshold, const doubl
     reset_next_label(g, damping);
 
     // apply current node contribution to others
-    for (int n = 1; n <= num_nodes; n++) {
-      double my_contribution = damping * g->get_label(n, CURRENT) / (double)g->get_out_degree(n);
-      for (int e = g->edge_begin(n); e < g->edge_end(n); e++) {
+#pragma omp parallel num_threads(num_threads)
+    {
+      int thread_id = omp_get_thread_num();
+      int start_edge = thread_id * num_edges / num_threads;
+      int end_edge = (thread_id + 1) * num_edges / num_threads - 1;
+
+      if (thread_id == num_threads - 1) {
+        end_edge = num_edges - 1;
+      }
+
+      for (int e = start_edge; e <= end_edge; e++)
+      {
+        // Binary search to find the range of vertices
+        int src_start = 0;
+        int src_end = num_nodes - 1;
+
+        while (src_start < src_end) {
+          int mid = src_start + (src_end - src_start) / 2;
+          if (g->edge_begin(mid) <= e) {
+            src_start = mid + 1;
+          } else{
+            src_end = mid;
+          }
+        }
+        int src_vertex = src_start;
+        // Compute contribution
+        double contribution = damping * g->get_label(src_vertex, CURRENT) / g->get_out_degree(src_vertex);
+
         int dst = g->get_edge_dst(e);
-        g->set_label(dst, NEXT, g->get_label(dst, NEXT) + my_contribution);
+
+        // Use compare-and-swap to update label
+        // g->compare_and_swap(e, dst, contribution);
+        g->compare_and_swap(e, dst, contribution);
       }
     }
 
@@ -504,6 +552,56 @@ void sort_and_print_label(CsrGraph* g, string out_file) {
 // }
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
+void default_pagerank(CsrGraph *g, const double threshold, const double damping)
+{
+  // You have to divide the work and assign it to threads to make this function parallel
+
+  // initialize
+  bool convergence = false;
+  int num_nodes = g->node_size();
+  for (int n = 1; n <= num_nodes; n++)
+  {
+    g->set_label(n, CURRENT, 1.0 / num_nodes);
+  }
+
+  uint64_t execTime; /*time in nanoseconds */
+  struct timespec tick, tock;
+
+  clock_gettime(CLOCK_MONOTONIC_RAW, &tick);
+
+  do
+  {
+    // reset next labels
+    reset_next_label(g, damping);
+
+    // apply current node contribution to others
+    for (int n = 1; n <= num_nodes; n++)
+    {
+      double my_contribution = damping * g->get_label(n, CURRENT) / (double)g->get_out_degree(n);
+      for (int e = g->edge_begin(n); e < g->edge_end(n); e++)
+      {
+        int dst = g->get_edge_dst(e);
+        g->set_label(dst, NEXT, g->get_label(dst, NEXT) + my_contribution);
+      }
+    }
+
+    // check the change across successive iterations to determine convergence
+    convergence = is_converged(g, threshold);
+
+    // update current labels
+    update_current_label(g);
+  } while (!convergence);
+
+  clock_gettime(CLOCK_MONOTONIC_RAW, &tock);
+
+  execTime = 1000000000 * (tock.tv_sec - tick.tv_sec) + tock.tv_nsec - tick.tv_nsec;
+
+  printf("Running Default Elapsed process CPU time = %llu nanoseconds\n", (long long unsigned int)execTime);
+
+  // scale the sum to 1
+  scale(g);
+}
+
 int main(int argc, char *argv[]) {
   // Ex: ./pagerank road-NY.dimacs road-NY.txt
   if (argc < 3) {
@@ -554,7 +652,16 @@ int main(int argc, char *argv[]) {
     if(choice == 3) printf("-----------------------------STARTING COMPARE AND SWAP-------------------------------------\n");
     if(choice == 4) printf("----------------------------------STARTING DEFAULT-------------------------------------------\n");
 
-    compute_pagerank(g, threshold, damping, num_threads, choice);
+    int a[] = {1, 2, 4, 8, 16};
+    for(int i = 0; i < 5; i++) {
+      compute_pagerank(g, threshold, damping, a[i], choice);
+    }
+
+    // if(choice == 4) {
+    //   default_pagerank(g, threshold, damping);
+    // } else {
+    //   compute_pagerank(g, threshold, damping, num_threads, choice);
+    // }
   }
 
   if(section == 2) {
