@@ -652,16 +652,16 @@ int main(int argc, char *argv[]) {
     if(choice == 3) printf("-----------------------------STARTING COMPARE AND SWAP-------------------------------------\n");
     if(choice == 4) printf("----------------------------------STARTING DEFAULT-------------------------------------------\n");
 
-    int a[] = {1, 2, 4, 8, 16};
-    for(int i = 0; i < 5; i++) {
-      compute_pagerank(g, threshold, damping, a[i], choice);
-    }
-
-    // if(choice == 4) {
-    //   default_pagerank(g, threshold, damping);
-    // } else {
-    //   compute_pagerank(g, threshold, damping, num_threads, choice);
+    // int a[] = {1, 2, 4, 8, 16};
+    // for(int i = 0; i < 5; i++) {
+    //   compute_pagerank(g, threshold, damping, a[i], choice);
     // }
+
+    if(choice == 4) {
+      default_pagerank(g, threshold, damping);
+    } else {
+      compute_pagerank(g, threshold, damping, num_threads, choice);
+    }
   }
 
   if(section == 2) {
