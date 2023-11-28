@@ -239,6 +239,20 @@ public:
     return ci[e];
   }
 
+  int get_weight_at(int n) {
+    return ai[n];
+  }
+
+  int node_edge_weights(int cur_node) {
+    int sum = 0;
+    int start = edge_begin(cur_node);
+    int end = edge_end(cur_node);
+    for (int i = start; i < end; i++) {
+      sum += get_weight_at(i);
+    }
+    return sum;
+  }
+
   void atomic_init() {
     atomic = new std::atomic<double>[num_nodes + 1];
   }
@@ -262,20 +276,20 @@ public:
     spin_lock[n].clear(std::memory_order_release);
   }
 
-  void relax_edge_mutex(int src, int dst, double my_contribution) {
+  void set_with_mutex(int src, int dst, double my_contribution) {
     lock_guard<mutex> lock(node_mutex[dst]); // Acquires lock
     set_label(dst, NEXT, get_label(dst, NEXT) + my_contribution);
     // releases lock after set_label is done.
   }
 
-  void relax_edge_spin(int src, int dst, double my_contribution) {
+  void set_with_spin_lock(int src, int dst, double my_contribution) {
     spin_lock_node(dst);
     set_label(dst, NEXT, get_label(dst, NEXT) + my_contribution);
     // printf("this is the label: %f \n", get_label(src, NEXT));
     spin_unlock_node(dst);
   }
 
-  void store_pankrank(int n, double my_contribution) {
+  void store_pagerank(int n, double my_contribution) {
     double value = node[n].labels[1] + my_contribution;
 
     // Atomically store the updated value
@@ -306,7 +320,7 @@ public:
     } while (!done);
 
     // Update the NEXT label outside the loop
-    store_pankrank(dst, my_contribution);
+    store_pagerank(dst, my_contribution);
   }
 };
 
@@ -378,12 +392,12 @@ void compute_pagerank(CsrGraph* g, const double threshold, const double damping,
       // apply current node contribution to others
       for (int n = 1; n <= num_nodes; n++)
       {
-        double my_contribution = damping * g->get_label(n, CURRENT) / (double)g->get_out_degree(n);
+        double my_contribution = damping * g->get_label(n, CURRENT) / (double)g->get_out_degree(n); 
         for (int e = g->edge_begin(n); e < g->edge_end(n); e++)
         {
           int dst = g->get_edge_dst(e);
-          if (choice == 1) g->relax_edge_mutex(n, dst, my_contribution);
-          if (choice == 2) g->relax_edge_spin(n, dst, my_contribution);
+          if (choice == 1) g->set_with_mutex(n, dst, my_contribution);
+          if (choice == 2) g->set_with_spin_lock(n, dst, my_contribution);
           if (choice == 3) g->compare_and_swap(threshold, n, dst, my_contribution);
         }
       }
@@ -406,28 +420,29 @@ void compute_pagerank(CsrGraph* g, const double threshold, const double damping,
   scale(g);
 }
 
-bool compare_and_swap(std::atomic<double> &destination, double &expected, double new_value)
-{
-  return destination.compare_exchange_weak(expected, new_value,
-                                           std::memory_order_seq_cst, std::memory_order_seq_cst);
+int vertex_binary_search (int b, CsrGraph* g) {
+  int lo = 1, hi = g->node_size();
+  while (lo < hi) {
+    int mid = lo + (hi - lo) / 2;
+    if (g->edge_begin(mid) <= b)
+      lo = mid + 1;
+    else
+      hi = mid;
+  }
+  return lo;
 }
 
 void compute_pagerank_balancing(CsrGraph *g, const double threshold, const double damping, int num_threads)
 {
-  // Init
+  // Init atomic
   g->atomic_init();
   int num_edges = g->size_edges();
-  int edges_per_thread = (num_edges + num_threads - 1) / num_threads; // this gives an even amount of edges to threads
-	// leftovers need to be taken care of
+  int edges_per_thread = (num_edges + num_threads - 1) / num_threads; // even amount of edges to threads
 
-  vector<pair<int,int>> thread_ranges(num_threads); // stores a range of edges for each thread to compute
-// go through each thread multiply t (thread num) by edges, this gets a start point in the range and (t+1) * edges gets the stop point in the range
-// store it in the thread_ranges
+  vector<pair<int,int>> thread_ranges(num_threads); 
   for (int t = 0; t < num_threads; t++) {
-    thread_ranges[t] = {min(t * edges_per_thread, num_edges),  
-                        min((t+1) * edges_per_thread, num_edges)};
+    thread_ranges[t] = {min(t * edges_per_thread, num_edges), min((t+1) * edges_per_thread, num_edges)};
   }
-  
   bool converged = false;
   for (int n = 1; n <= g->node_size(); n++) {
     g->set_label(n, CURRENT, 1.0 / g->node_size()); 
@@ -439,47 +454,28 @@ void compute_pagerank_balancing(CsrGraph *g, const double threshold, const doubl
   clock_gettime(CLOCK_MONOTONIC_RAW, &tick);
   do {
 
-    // Reset next labels
+    // Resets next labels
     reset_next_label(g, damping);
 
-    // go through every threads range and compute binary search for source vertex
   #pragma omp parallel num_threads(num_threads)
     {
       int tid = omp_get_thread_num();
       int start_edge = thread_ranges[tid].first; // start of range index
       int end_edge = thread_ranges[tid].second; // end of range index
 
-
-      // Binary search range of vertices  
-      int lo = 1, hi = g->node_size();
-      while (lo < hi) {
-        int mid = lo + (hi - lo) / 2;
-        if (g->edge_begin(mid) <= start_edge)
-          lo = mid + 1;
-        else
-          hi = mid;
-      }
-      int start_vertex = lo;
-
-      lo = 1, hi = g->node_size();
-      while (lo < hi) {
-        int mid = lo + (hi - lo) / 2;
-        if (g->edge_begin(mid) <= end_edge)
-          lo = mid + 1;
-        else
-          hi = mid;  
-      }
-      int end_vertex = lo;
+      // Binary search range of vertices
+      int start_vertex = vertex_binary_search (start_edge, g);
+      int end_vertex = vertex_binary_search (end_edge, g);
       
-      // Rest same as before
-      for (int src = start_vertex; src <= end_vertex; src++) {
-        double contrib = damping * g->get_label(src, CURRENT) / g->get_out_degree(src);
+      // same algorithm as before
+      for (int n = start_vertex; n <= end_vertex; n++) {
+        double contrib = damping * g->get_label(n, CURRENT) / g->get_out_degree(n);
 
-        int begin = (src == start_vertex) ? start_edge : g->edge_begin(src);  
-        int eend = (src == end_vertex) ? end_edge : g->edge_end(src);
+        int begining = (n == start_vertex) ? start_edge : g->edge_begin(n);  
+        int end = (n == end_vertex) ? end_edge : g->edge_end(n);
         
-        for (int e = begin; e < eend; e++) {
-          g->compare_and_swap(threshold, src, g->get_edge_dst(e), contrib); // threshold,
+        for (int e = begining; e < end; e++) {
+          g->compare_and_swap(threshold, n, g->get_edge_dst(e), contrib); // threshold,
         }
       }
 
@@ -491,9 +487,7 @@ void compute_pagerank_balancing(CsrGraph *g, const double threshold, const doubl
   } while (!converged);
 
   clock_gettime(CLOCK_MONOTONIC_RAW, &tock);
-
   execTime = 1000000000 * (tock.tv_sec - tick.tv_sec) + tock.tv_nsec - tick.tv_nsec;
-
   printf("NumThreads: %d, Elapsed process CPU time = %llu nanoseconds\n", num_threads, (long long unsigned int)execTime);
   
   scale(g);
@@ -521,61 +515,6 @@ void sort_and_print_label(CsrGraph* g, string out_file) {
     out_stream << v.first << " " << fixed << setprecision(6) << v.second << endl;
   }
 }
-
-
-/////////////////////////////////////// raw copied from AI (work in progress) ////////////////////////////////////////////
-// The key ideas:
-
-// Split edges evenly among threads
-// Use binary search to find source vertex range
-// Process edges in order and move source vertex when needed
-// Use compare-and-swap for synchronization
-// Assign equal number of edges to each thread 
-// int num_threads = 4;
-// int edges_per_thread = num_edges / num_threads;
-
-// #pragma omp parallel num_threads(num_threads)
-// {
-//     int thread_id = omp_get_thread_num();
-//     int start_edge = thread_id * edges_per_thread; 
-//     int end_edge = (thread_id + 1) * edges_per_thread - 1;
-//     if (thread_id == num_threads - 1) {
-//         end_edge = num_edges - 1; 
-//     }
-    
-//     // Binary search to find range of vertices 
-//     int src_start = 0;
-//     int src_end = num_nodes - 1;
-//     while (src_start < src_end) {
-//         int mid = src_start + (src_end - src_start) / 2;
-//         if (g->edge_begin(mid) <= start_edge) {
-//             src_start = mid + 1; 
-//         } else {
-//             src_end = mid;
-//         }
-//     }
-    
-//     int src_vertex = src_start;
-//     for (int e = start_edge; e <= end_edge; e++) {
-//         // Compute contribution 
-//         double contribution = 
-//             damping * g->get_label(src_vertex, CURRENT) / g->get_out_degree(src_vertex);
-            
-//         int dst = g->get_edge_dst(e);
-        
-//         // Use compare-and-swap to update label 
-//         double old_val = g->get_label(dst, NEXT);
-//         while (!compare_and_swap(old_val, old_val + contribution)) {
-//             old_val = g->get_label(dst, NEXT);
-//         }
-        
-//         // Move to next vertex if needed
-//         if (e + 1 >= g->edge_begin(src_vertex + 1)) {
-//             src_vertex++;
-//         }
-//     }
-// }
-/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 void default_pagerank(CsrGraph *g, const double threshold, const double damping)
 {
@@ -650,9 +589,9 @@ int main(int argc, char *argv[]) {
 
   // change the number of threads
   int num_threads;
-  // 1,2,4,8,16
-  while (num_threads != 1 && num_threads != 2 && num_threads != 4 && num_threads != 8 && num_threads != 16) {
-    cout << "How many threads do you want to run? Choices [1, 2, 4, 8, 16]: ";
+  // -1,0,1,2,4,8,16
+  while (num_threads != -1 && num_threads != 0 && num_threads != 1 && num_threads != 2 && num_threads != 4 && num_threads != 8 && num_threads != 16) {
+    cout << "Number of threads do you want to run? Choices [-1 (all of them), 0 (none/default), 1, 2, 4, 8, 16]: ";
     cin >> num_threads;
   }
 
@@ -667,27 +606,30 @@ int main(int argc, char *argv[]) {
   if(section == 1) {
     int choice;
 
-    while (choice != 1 && choice != 2 && choice != 3 && choice != 4) {
-      cout << "Which method do you want to run mutex == 1, spin_locks == 2, compare_and_swap == 3 or default == 4?: ";
-      cin >> choice;
+    if (num_threads == 0) {
+      default_pagerank(g, threshold, damping);
+    } else {
+      while (choice != 1 && choice != 2 && choice != 3) {
+        cout << "Which method do you want to run mutex == 1, spin_locks == 2, compare_and_swap == 3?: ";
+        cin >> choice;
+      }
+
+      if(choice == 1) printf("----------------------------------STARTING MUTEX-------------------------------------------\n");
+      if(choice == 2) printf("---------------------------------STARTING SPIN LOCK----------------------------------------\n");
+      if(choice == 3) printf("-----------------------------STARTING COMPARE AND SWAP-------------------------------------\n");
+
+      if (num_threads == -1) {
+        printf("------------------------ Using 1, 2, 4, 8 and 16 threads ----------------------------------\n");
+        int a[] = {1, 2, 4, 8, 16};
+        for(int i = 0; i < 5; i++) {
+          compute_pagerank(g, threshold, damping, a[i], choice);
+        }
+      } else {
+        compute_pagerank(g, threshold, damping, num_threads, choice);
+      }
     }
-
-    if(choice == 1) printf("----------------------------------STARTING MUTEX-------------------------------------------\n");
-    if(choice == 2) printf("---------------------------------STARTING SPIN LOCK----------------------------------------\n");
-    if(choice == 3) printf("-----------------------------STARTING COMPARE AND SWAP-------------------------------------\n");
-    if(choice == 4) printf("----------------------------------STARTING DEFAULT-------------------------------------------\n");
-
-    int a[] = {1, 2, 4, 8, 16};
-    for(int i = 0; i < 5; i++) {
-      compute_pagerank(g, threshold, damping, a[i], choice);
-    }
-
-    // if(choice == 4) {
-    //   default_pagerank(g, threshold, damping);
-    // } else {
-    //   compute_pagerank(g, threshold, damping, num_threads, choice);
-    // }
   }
+
   if(section == 2) {
     // compute_pagerank_balancing(g, threshold, damping, num_threads);
     int a[] = {1, 2, 4, 8, 16};
