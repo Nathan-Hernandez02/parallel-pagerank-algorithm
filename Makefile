@@ -1,5 +1,5 @@
 CXX = g++
-CXXFLAGS = -std=c++11 -Wall -fopenmp
+CXXFLAGS = -std=c++11 -Wall -fopenmp -O3
 SRC = pagerank.cpp
 OUT = pagerank
 

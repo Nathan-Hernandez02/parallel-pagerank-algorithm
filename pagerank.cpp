@@ -281,10 +281,7 @@ public:
     set_label(n, NEXT, value);
   }
 
-  void compare_and_swap(int src, int dst, double my_contribution) {
-    auto condition = [](double old, double new_val)
-    { return fabs(new_val - old) > 0.0001; };
-
+  void compare_and_swap(int threshold, int src, int dst, double my_contribution) {
     double old, new_val;
     bool done = false;
 
@@ -295,7 +292,7 @@ public:
       // Calculate the new value without updating
       new_val = old + my_contribution;
 
-      if (condition(old, new_val)) {
+      if (fabs(new_val - old) > threshold) {
         // Perform the update using compare_and_swap with the calculated new value
         done = atomic[dst].compare_exchange_weak(old, new_val, std::memory_order_acq_rel, std::memory_order_relaxed);
       } else {
@@ -371,19 +368,21 @@ void compute_pagerank(CsrGraph* g, const double threshold, const double damping,
     reset_next_label(g, damping);
 
     // apply current node contribution to others
-    #pragma omp parallel for num_threads(num_threads)
-    for (int n = 1; n <= num_nodes; n++) {
-      double my_contribution = damping * g->get_label(n, CURRENT) / (double)g->get_out_degree(n);
-      for (int e = g->edge_begin(n); e < g->edge_end(n); e++) {
-        int dst = g->get_edge_dst(e);
-
-        //section one
-        if(choice == 1) g->relax_edge_mutex(n, dst, my_contribution);
-        if(choice == 2) g->relax_edge_spin(n, dst, my_contribution);
-        if(choice == 3) g->compare_and_swap(n, dst, my_contribution);
-        // if(choice == 4) g->set_label(dst, NEXT, g->get_label(dst, NEXT) + my_contribution);
+#pragma omp parallel num_threads(num_threads)
+    {
+#pragma omp for
+      // apply current node contribution to others
+      for (int n = 1; n <= num_nodes; n++)
+      {
+        double my_contribution = damping * g->get_label(n, CURRENT) / (double)g->get_out_degree(n);
+        for (int e = g->edge_begin(n); e < g->edge_end(n); e++)
+        {
+          int dst = g->get_edge_dst(e);
+          if (choice == 1) g->relax_edge_mutex(n, dst, my_contribution);
+          if (choice == 2) g->relax_edge_spin(n, dst, my_contribution);
+          if (choice == 3) g->compare_and_swap(threshold, n, dst, my_contribution);
+        }
       }
-      // printf("this is the num_node: %d \n", n);
     }
 
     // check the change across successive iterations to determine convergence
@@ -459,7 +458,7 @@ void compute_pagerank_balancing(CsrGraph *g, const double threshold, const doubl
 
         // Use compare-and-swap to update label
         // g->compare_and_swap(e, dst, contribution);
-        g->compare_and_swap(e, dst, contribution);
+        // g->compare_and_swap(e, dst, contribution);
       }
     }
 
@@ -652,18 +651,17 @@ int main(int argc, char *argv[]) {
     if(choice == 3) printf("-----------------------------STARTING COMPARE AND SWAP-------------------------------------\n");
     if(choice == 4) printf("----------------------------------STARTING DEFAULT-------------------------------------------\n");
 
-    // int a[] = {1, 2, 4, 8, 16};
-    // for(int i = 0; i < 5; i++) {
-    //   compute_pagerank(g, threshold, damping, a[i], choice);
-    // }
-
-    if(choice == 4) {
-      default_pagerank(g, threshold, damping);
-    } else {
-      compute_pagerank(g, threshold, damping, num_threads, choice);
+    int a[] = {1, 2, 4, 8, 16};
+    for(int i = 0; i < 5; i++) {
+      compute_pagerank(g, threshold, damping, a[i], choice);
     }
-  }
 
+    // if(choice == 4) {
+    //   default_pagerank(g, threshold, damping);
+    // } else {
+    //   compute_pagerank(g, threshold, damping, num_threads, choice);
+    // }
+  }
   if(section == 2) {
     compute_pagerank_balancing(g, threshold, damping, num_threads);
   }
