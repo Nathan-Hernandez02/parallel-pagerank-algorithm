@@ -239,6 +239,10 @@ public:
     return ci[e];
   }
 
+  void atomic_init() {
+    atomic = new std::atomic<double>[num_nodes + 1];
+  }
+
   void init_sync() {
     node_mutex = new mutex[num_nodes + 1];
     spin_lock = new atomic_flag[num_nodes + 1];
@@ -246,7 +250,7 @@ public:
     for(int i = 1; i <= num_nodes; ++i) {
       spin_lock[i].clear();
     }
-    atomic = new std::atomic<double>[num_nodes + 1];
+    atomic_init();
   }
 
   void spin_lock_node(int n) {
@@ -410,66 +414,88 @@ bool compare_and_swap(std::atomic<double> &destination, double &expected, double
 
 void compute_pagerank_balancing(CsrGraph *g, const double threshold, const double damping, int num_threads)
 {
-  bool convergence = false;
-  g->init_sync();
-  int num_nodes = g->node_size();
+  // Init
+  g->atomic_init();
   int num_edges = g->size_edges();
+  int edges_per_thread = (num_edges + num_threads - 1) / num_threads; // this gives an even amount of edges to threads
+	// leftovers need to be taken care of
 
-  for (int n = 1; n <= num_nodes; n++)
-  {
-    g->set_label(n, CURRENT, 1.0 / num_nodes);
+  vector<pair<int,int>> thread_ranges(num_threads); // stores a range of edges for each thread to compute
+// go through each thread multiply t (thread num) by edges, this gets a start point in the range and (t+1) * edges gets the stop point in the range
+// store it in the thread_ranges
+  for (int t = 0; t < num_threads; t++) {
+    thread_ranges[t] = {min(t * edges_per_thread, num_edges),  
+                        min((t+1) * edges_per_thread, num_edges)};
+  }
+  
+  bool converged = false;
+  for (int n = 1; n <= g->node_size(); n++) {
+    g->set_label(n, CURRENT, 1.0 / g->node_size()); 
   }
 
-  do
-  {
-    // reset next labels
+  uint64_t execTime; /*time in nanoseconds */
+  struct timespec tick, tock;
+
+  clock_gettime(CLOCK_MONOTONIC_RAW, &tick);
+  do {
+
+    // Reset next labels
     reset_next_label(g, damping);
 
-    // apply current node contribution to others
-#pragma omp parallel num_threads(num_threads)
+    // go through every threads range and compute binary search for source vertex
+  #pragma omp parallel num_threads(num_threads)
     {
-      int thread_id = omp_get_thread_num();
-      int start_edge = thread_id * num_edges / num_threads;
-      int end_edge = (thread_id + 1) * num_edges / num_threads - 1;
+      int tid = omp_get_thread_num();
+      int start_edge = thread_ranges[tid].first; // start of range index
+      int end_edge = thread_ranges[tid].second; // end of range index
 
-      if (thread_id == num_threads - 1) {
-        end_edge = num_edges - 1;
+
+      // Binary search range of vertices  
+      int lo = 1, hi = g->node_size();
+      while (lo < hi) {
+        int mid = lo + (hi - lo) / 2;
+        if (g->edge_begin(mid) <= start_edge)
+          lo = mid + 1;
+        else
+          hi = mid;
       }
+      int start_vertex = lo;
 
-      for (int e = start_edge; e <= end_edge; e++)
-      {
-        // Binary search to find the range of vertices
-        int src_start = 0;
-        int src_end = num_nodes - 1;
+      lo = 1, hi = g->node_size();
+      while (lo < hi) {
+        int mid = lo + (hi - lo) / 2;
+        if (g->edge_begin(mid) <= end_edge)
+          lo = mid + 1;
+        else
+          hi = mid;  
+      }
+      int end_vertex = lo;
+      
+      // Rest same as before
+      for (int src = start_vertex; src <= end_vertex; src++) {
+        double contrib = damping * g->get_label(src, CURRENT) / g->get_out_degree(src);
 
-        while (src_start < src_end) {
-          int mid = src_start + (src_end - src_start) / 2;
-          if (g->edge_begin(mid) <= e) {
-            src_start = mid + 1;
-          } else{
-            src_end = mid;
-          }
+        int begin = (src == start_vertex) ? start_edge : g->edge_begin(src);  
+        int eend = (src == end_vertex) ? end_edge : g->edge_end(src);
+        
+        for (int e = begin; e < eend; e++) {
+          g->compare_and_swap(threshold, src, g->get_edge_dst(e), contrib); // threshold,
         }
-        int src_vertex = src_start;
-        // Compute contribution
-        double contribution = damping * g->get_label(src_vertex, CURRENT) / g->get_out_degree(src_vertex);
-
-        int dst = g->get_edge_dst(e);
-
-        // Use compare-and-swap to update label
-        // g->compare_and_swap(e, dst, contribution);
-        // g->compare_and_swap(e, dst, contribution);
       }
+
     }
 
-    // check the change across successive iterations to determine convergence
-    convergence = is_converged(g, threshold);
-
-    // update current labels
+    converged = is_converged(g, threshold);
     update_current_label(g);
-  } while (!convergence);
 
-  // scale the sum to 1
+  } while (!converged);
+
+  clock_gettime(CLOCK_MONOTONIC_RAW, &tock);
+
+  execTime = 1000000000 * (tock.tv_sec - tick.tv_sec) + tock.tv_nsec - tick.tv_nsec;
+
+  printf("NumThreads: %d, Elapsed process CPU time = %llu nanoseconds\n", num_threads, (long long unsigned int)execTime);
+  
   scale(g);
 }
 
@@ -663,7 +689,12 @@ int main(int argc, char *argv[]) {
     // }
   }
   if(section == 2) {
-    compute_pagerank_balancing(g, threshold, damping, num_threads);
+    // compute_pagerank_balancing(g, threshold, damping, num_threads);
+    int a[] = {1, 2, 4, 8, 16};
+    for(int i = 0; i < 5; i++) {
+      compute_pagerank_balancing(g, threshold, damping, a[i]);
+    }
+
   }
 
   // sort and print the labels to the output file
